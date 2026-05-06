@@ -209,6 +209,7 @@ class KeywordRow:
     ad_group: str
     status: str
     final_url: str = ""
+    account: str = ""       # MCC sub-account name (empty if single-account export)
     row_index: int = 0      # original CSV row number for traceability
 
 
@@ -289,6 +290,7 @@ COL_ALIASES = {
     "match_type": ["match type", "type overeenkomst"],
     "status":     ["status"],
     "final_url":  ["final url", "uiteindelijke url"],
+    "account":    ["account", "klant", "customer"],   # MCC sub-account name
 }
 
 
@@ -358,6 +360,7 @@ def read_keywords_csv(csv_path: str | Path) -> list[KeywordRow]:
             ad_group=get("ad_group"),
             status=get("status") or "Active",
             final_url=get("final_url"),
+            account=get("account"),
             row_index=row_i,
         ))
     return out
@@ -384,20 +387,37 @@ def _is_serving(status: str) -> bool:
 
 
 def detect_conflicts(rows: list[KeywordRow]) -> list[Conflict]:
-    """Run all four detectors. Returns deduplicated list of conflicts.
+    """Run all four detectors per-account. Returns deduplicated list of conflicts.
 
     Skips non-serving keywords (Paused, Not eligible). Google Ads' effective
-    Status already reflects parent campaign / ad-group pause state, so a
-    keyword inside a paused campaign or paused ad group is automatically
-    excluded — no separate campaign-status / ad-group-status column needed.
+    Status already reflects parent campaign / ad-group pause state.
+
+    Detection is scoped PER MCC sub-account — keywords in different sub-accounts
+    are different clients and don't compete with each other for impressions,
+    so we never flag cross-account "conflicts". If the export has no Account
+    column (single-account export), all rows are treated as one account.
     """
     # Filter out non-serving keywords
     active_rows = [r for r in rows if _is_serving(r.status)]
+
+    # Group by account, then run detection within each account
+    by_account: dict[str, list[KeywordRow]] = defaultdict(list)
+    for r in active_rows:
+        by_account[r.account].append(r)
+
+    conflicts: list[Conflict] = []
+    for account_rows in by_account.values():
+        conflicts.extend(_detect_within_account(account_rows))
+    # Sort across all accounts at the end
+    conflicts.sort(key=lambda c: (c.severity_rank, -len(c.keywords_involved)))
+    return conflicts
+
+
+def _detect_within_account(active_rows: list[KeywordRow]) -> list[Conflict]:
+    """Run all four detectors on a single-account row set."""
     conflicts: list[Conflict] = []
 
-    # Helper: a unique "ad group instance" is the (campaign, ad_group) tuple,
-    # because the same ad-group name can exist in different campaigns and they
-    # are distinct serving units.
+    # Helper: a unique "ad group instance" is the (campaign, ad_group) tuple.
     def _ag_key(r: KeywordRow) -> tuple[str, str]:
         return (r.campaign, r.ad_group)
 
@@ -624,18 +644,27 @@ def build_excel(conflicts: list[Conflict], output_path: str):
 # ═════════════════════════════════════════════════════════════════════════════
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python detect_overlap.py <keywords_csv> [output_path]")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Detect duplicate / overlapping keywords in a Google Ads keywords export.",
+    )
+    parser.add_argument("csv_path", help="Keywords CSV from Google Ads Editor or UI (MCC export with Account column also supported)")
+    parser.add_argument("output_path", nargs="?", help="Output xlsx path (default: keyword_overlap_<input>.xlsx in same directory)")
+    parser.add_argument(
+        "--accounts", default="",
+        help="Comma-separated list of MCC sub-account names to include (case-insensitive substring match). "
+             "If omitted, all accounts in the CSV are processed. "
+             'Example: --accounts "ARBO,Ewals,Smartgyro"',
+    )
+    args = parser.parse_args()
 
-    csv_path = sys.argv[1]
+    csv_path = args.csv_path
     if not Path(csv_path).exists():
         print(f"ERROR: file not found: {csv_path}")
         sys.exit(1)
 
-    if len(sys.argv) >= 3 and sys.argv[2]:
-        output_path = sys.argv[2]
-    else:
+    output_path = args.output_path
+    if not output_path:
         base = os.path.splitext(os.path.basename(csv_path))[0]
         output_path = os.path.join(os.path.dirname(csv_path), f"keyword_overlap_{base}.xlsx")
 
@@ -643,9 +672,25 @@ def main():
     rows = read_keywords_csv(csv_path)
     print(f"  Loaded {len(rows)} keywords")
 
+    # Apply --accounts filter if specified
+    if args.accounts:
+        wanted = [a.strip().lower() for a in args.accounts.split(",") if a.strip()]
+        before = len(rows)
+        rows = [r for r in rows if any(w in (r.account or "").lower() for w in wanted)]
+        print(f"  Filtered to accounts {wanted}: {len(rows)} / {before} kept")
+
+    # Show per-account breakdown if multi-account
+    accounts_present = {r.account for r in rows if r.account}
+    if len(accounts_present) > 1:
+        from collections import Counter
+        acct_counts = Counter(r.account for r in rows)
+        print(f"\nAccounts in scope ({len(accounts_present)}):")
+        for acct, n in acct_counts.most_common():
+            print(f"  {n:5} kw  {acct}")
+
     serving = sum(1 for r in rows if _is_serving(r.status))
     not_serving = len(rows) - serving
-    print(f"  Serving: {serving}, Not serving (paused / not eligible / disapproved): {not_serving}")
+    print(f"\n  Serving: {serving}, Not serving (paused / not eligible / disapproved): {not_serving}")
 
     conflicts = detect_conflicts(rows)
     print(f"\nConflicts detected: {len(conflicts)}")

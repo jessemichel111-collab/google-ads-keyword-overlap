@@ -71,17 +71,27 @@ User exports keywords from Google Ads:
 ### Step 2 — Run the script
 
 ```
-python scripts/detect_overlap.py <keywords_csv> [output_path]
+python scripts/detect_overlap.py <keywords_csv> [output_path] [--accounts "Acct1,Acct2,..."]
 ```
 
 Examples:
 ```bash
+# Single-account export
 python scripts/detect_overlap.py keywords_export.csv
-# Output → keyword_overlap_keywords_export.xlsx in same directory
 
-python scripts/detect_overlap.py keywords.csv ~/Downloads/ewals_overlap.xlsx
-# Custom output path
+# MCC export (all sub-accounts)
+python scripts/detect_overlap.py mcc_export.csv
+
+# MCC export with sub-account filter (case-insensitive substring match)
+python scripts/detect_overlap.py mcc_export.csv \
+  --accounts "ARBO,Ewals,Smartgyro,Vetus"
 ```
+
+### MCC support and account scoping
+
+- If the input CSV has an **Account** column (MCC export), each MCC sub-account is treated as a separate client. Conflict detection runs **per-account**, so a keyword in Smartgyro can never be flagged as conflicting with a keyword in Ewals — they're different clients.
+- Use `--accounts "name1,name2"` to limit detection to specific sub-accounts (case-insensitive substring match against the Account column).
+- If the CSV has no Account column (single-account export), all rows are treated as one account.
 
 ### Step 3 — Report back to the user
 
