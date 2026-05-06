@@ -367,10 +367,32 @@ def read_keywords_csv(csv_path: str | Path) -> list[KeywordRow]:
 # Conflict detection
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _is_serving(status: str) -> bool:
+    """Whether a keyword is currently serving (eligible to show ads).
+
+    Google Ads' effective Status value reflects parent campaign and ad-group
+    pause state — if either is paused, the keyword's Status is "Paused" too.
+    We also exclude 'Not eligible' (low-quality/disapproved keywords that
+    don't actually serve). 'Limited' keywords still serve and are kept.
+    """
+    if not status:
+        return True  # missing status — assume active
+    s = status.lower().strip()
+    if s in ("paused", "not eligible"):
+        return False
+    return True
+
+
 def detect_conflicts(rows: list[KeywordRow]) -> list[Conflict]:
-    """Run all four detectors. Returns deduplicated list of conflicts."""
-    # Filter out paused (skip from active conflict detection but track all_paused)
-    active_rows = [r for r in rows if r.status.lower() != "paused"]
+    """Run all four detectors. Returns deduplicated list of conflicts.
+
+    Skips non-serving keywords (Paused, Not eligible). Google Ads' effective
+    Status already reflects parent campaign / ad-group pause state, so a
+    keyword inside a paused campaign or paused ad group is automatically
+    excluded — no separate campaign-status / ad-group-status column needed.
+    """
+    # Filter out non-serving keywords
+    active_rows = [r for r in rows if _is_serving(r.status)]
     conflicts: list[Conflict] = []
 
     # Helper: a unique "ad group instance" is the (campaign, ad_group) tuple,
@@ -615,9 +637,9 @@ def main():
     rows = read_keywords_csv(csv_path)
     print(f"  Loaded {len(rows)} keywords")
 
-    active = sum(1 for r in rows if r.status.lower() != "paused")
-    paused = sum(1 for r in rows if r.status.lower() == "paused")
-    print(f"  Active: {active}, Paused: {paused}")
+    serving = sum(1 for r in rows if _is_serving(r.status))
+    not_serving = len(rows) - serving
+    print(f"  Serving: {serving}, Not serving (paused / not eligible / disapproved): {not_serving}")
 
     conflicts = detect_conflicts(rows)
     print(f"\nConflicts detected: {len(conflicts)}")
