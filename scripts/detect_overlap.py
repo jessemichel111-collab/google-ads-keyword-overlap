@@ -557,26 +557,116 @@ def build_excel(conflicts: list[Conflict], output_path: str):
     real_conflicts = [c for c in conflicts if not (c.geo_segmented or c.brand_segmented or c.all_paused)]
     intentional_conflicts = [c for c in conflicts if c.geo_segmented or c.brand_segmented or c.all_paused]
 
-    # ── Sheet 1: ACTION ITEMS — only real conflicts, account-grouped ────────
-    ws = wb.active
-    ws.title = "Action Items"
-
-    action_headers = [
-        "Severity", "Account", "Conflict type",
-        "Keyword(s)", "Match types", "Ad groups", "Campaigns", "# instances",
-    ]
-    for col_idx, h in enumerate(action_headers, 1):
-        cell = ws.cell(row=1, column=col_idx, value=h)
-        cell.font = header_font
-        cell.fill = PatternFill("solid", fgColor="404040")
-        cell.font = Font(bold=True, color="FFFFFF")
-
     severity_label = {
         "EXACT_DUPLICATE": "🔴 High",
         "MATCH_TYPE_OVERLAP": "🟡 Medium",
         "PHRASE_CONTAINS": "🟡 Medium",
         "CLOSE_VARIANT": "🟢 Low",
     }
+
+    # ── Sheet 1: ACTION ITEMS — Summary dashboard + detail ──────────────────
+    ws = wb.active
+    ws.title = "Action Items"
+
+    # Compute per-account summary
+    from collections import Counter as _Counter
+    acct_total = _Counter()
+    acct_by_severity = {}  # account → Counter of severity-emoji
+    for c in real_conflicts:
+        acct = c.keywords_involved[0].account if c.keywords_involved else "(no account)"
+        acct_total[acct] += 1
+        if acct not in acct_by_severity:
+            acct_by_severity[acct] = _Counter()
+        sev = severity_label.get(c.conflict_type, "")
+        # Use just the emoji for compact summary
+        acct_by_severity[acct][sev] += 1
+
+    severity_total = _Counter()
+    for c in real_conflicts:
+        severity_total[severity_label.get(c.conflict_type, "")] += 1
+
+    intentional_total = _Counter()
+    for c in intentional_conflicts:
+        if c.geo_segmented:
+            intentional_total["Geo-segmented"] += 1
+        elif c.brand_segmented:
+            intentional_total["Brand-segmented"] += 1
+        elif c.all_paused:
+            intentional_total["All paused"] += 1
+
+    # Build summary block (rows 1-N)
+    title_fill = PatternFill("solid", fgColor="1F4E79")
+    title_font = Font(bold=True, color="FFFFFF", size=14)
+    section_fill = PatternFill("solid", fgColor="2E75B6")
+    section_font = Font(bold=True, color="FFFFFF", size=11)
+    summary_value_fill = PatternFill("solid", fgColor="F2F2F2")
+
+    row_idx = 1
+
+    # Title
+    ws.cell(row=row_idx, column=1, value="KEYWORD OVERLAP — SUMMARY").font = title_font
+    ws.cell(row=row_idx, column=1).fill = title_fill
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=8)
+    row_idx += 1
+
+    # Total stats line
+    ws.cell(row=row_idx, column=1, value=f"Total real conflicts (action needed): {len(real_conflicts)}").font = Font(bold=True, size=11)
+    row_idx += 1
+    ws.cell(row=row_idx, column=1, value=f"Total intentional (excluded): {len(intentional_conflicts)} "
+                                          f"({intentional_total.get('Brand-segmented', 0)} brand, "
+                                          f"{intentional_total.get('Geo-segmented', 0)} geo, "
+                                          f"{intentional_total.get('All paused', 0)} paused)").font = Font(italic=True, color="666666", size=10)
+    row_idx += 2
+
+    # Per-severity breakdown (compact horizontal)
+    ws.cell(row=row_idx, column=1, value="By severity:").font = Font(bold=True, size=11)
+    row_idx += 1
+    for sev in ["🔴 High", "🟡 Medium", "🟢 Low"]:
+        n = severity_total.get(sev, 0)
+        if n > 0:
+            ws.cell(row=row_idx, column=1, value=f"  {sev}").alignment = Alignment(indent=1)
+            ws.cell(row=row_idx, column=2, value=n)
+            row_idx += 1
+    row_idx += 1
+
+    # Per-account breakdown table
+    ws.cell(row=row_idx, column=1, value="By account").font = section_font
+    ws.cell(row=row_idx, column=1).fill = section_fill
+    ws.cell(row=row_idx, column=2, value="High").font = section_font
+    ws.cell(row=row_idx, column=2).fill = section_fill
+    ws.cell(row=row_idx, column=3, value="Medium").font = section_font
+    ws.cell(row=row_idx, column=3).fill = section_fill
+    ws.cell(row=row_idx, column=4, value="Low").font = section_font
+    ws.cell(row=row_idx, column=4).fill = section_fill
+    ws.cell(row=row_idx, column=5, value="Total").font = section_font
+    ws.cell(row=row_idx, column=5).fill = section_fill
+    row_idx += 1
+
+    for acct, n in sorted(acct_total.items(), key=lambda x: -x[1]):
+        ws.cell(row=row_idx, column=1, value=acct).fill = summary_value_fill
+        ws.cell(row=row_idx, column=2, value=acct_by_severity[acct].get("🔴 High", 0) or "")
+        ws.cell(row=row_idx, column=3, value=acct_by_severity[acct].get("🟡 Medium", 0) or "")
+        ws.cell(row=row_idx, column=4, value=acct_by_severity[acct].get("🟢 Low", 0) or "")
+        ws.cell(row=row_idx, column=5, value=n).font = Font(bold=True)
+        row_idx += 1
+    row_idx += 2
+
+    # Detail title
+    ws.cell(row=row_idx, column=1, value="ACTION ITEMS — DETAIL").font = title_font
+    ws.cell(row=row_idx, column=1).fill = title_fill
+    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=8)
+    row_idx += 1
+
+    action_headers = [
+        "Severity", "Account", "Conflict type",
+        "Keyword(s)", "Match types", "Ad groups", "Campaigns", "# instances",
+    ]
+    for col_idx, h in enumerate(action_headers, 1):
+        cell = ws.cell(row=row_idx, column=col_idx, value=h)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="404040")
+    row_idx += 1
+    detail_header_row = row_idx - 1  # used for freeze_panes
 
     # Sort: account first, then severity, then # instances desc
     real_sorted = sorted(real_conflicts, key=lambda c: (
@@ -585,7 +675,6 @@ def build_excel(conflicts: list[Conflict], output_path: str):
         -len(c.keywords_involved),
     ))
 
-    row_idx = 2
     last_account = None
     for c in real_sorted:
         account = c.keywords_involved[0].account if c.keywords_involved else ""
@@ -622,14 +711,15 @@ def build_excel(conflicts: list[Conflict], output_path: str):
         row_idx += 1
 
     if not real_sorted:
-        cell = ws.cell(row=2, column=1, value="No real conflicts detected — all overlaps appear intentional (geo / brand / paused).")
+        cell = ws.cell(row=row_idx, column=1, value="No real conflicts detected — all overlaps appear intentional (geo / brand / paused).")
         cell.font = Font(italic=True, color="888888")
-        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=8)
+        ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=8)
 
     widths = [12, 22, 18, 38, 22, 35, 35, 12]
     for col_letter, width in zip("ABCDEFGH", widths):
         ws.column_dimensions[col_letter].width = width
-    ws.freeze_panes = "A2"
+    # Freeze just below the detail-section header so summary stays visible
+    ws.freeze_panes = ws.cell(row=detail_header_row + 1, column=1).coordinate
 
     # ── Sheet 2: ALL ISSUES — full reference (real + intentional) ────────────
     all_ws = wb.create_sheet("All Issues (reference)")
