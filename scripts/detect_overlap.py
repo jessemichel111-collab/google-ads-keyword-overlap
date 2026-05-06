@@ -159,6 +159,39 @@ def _stem_lite(kw: str) -> str:
     return " ".join(words)
 
 
+# ── Brand-prefix segmentation (user-supplied) ────────────────────────────────
+def _is_brand_segmented(campaign_names: list[str], brand_prefixes: list[str]) -> bool:
+    """Return True if all campaigns share a common structure but are split by
+    user-declared brand prefixes (intentional parallel brand campaigns).
+
+    Detects: campaigns whose first token (split by ' - ') is one of the user-
+    supplied prefixes, AND at least 2 distinct prefixes are involved across
+    the campaigns. Used when an account runs intentional duplicate campaign
+    trees under different brand identities (e.g. ARBO centrum runs both DNZ
+    and SF brand variants in parallel).
+
+    Examples (with brand_prefixes = ['DNZ', 'SF']):
+      ['DNZ - Search - NL - X', 'SF - Search - NL - Y']  → True (intentional)
+      ['DNZ - Logistiek', 'DNZ - Hoogwerker']            → False (within-DNZ, real)
+      ['Random Campaign', 'Other Random']                → False (no brand match)
+    """
+    if not brand_prefixes or len(campaign_names) < 2:
+        return False
+    prefixes_lower = {p.lower().strip() for p in brand_prefixes if p.strip()}
+    if not prefixes_lower:
+        return False
+    found = set()
+    for name in campaign_names:
+        tokens = re.split(r"\s*-\s*", name.strip(), maxsplit=1)
+        if not tokens:
+            return False
+        first = tokens[0].lower().strip()
+        if first not in prefixes_lower:
+            return False  # any campaign without a known brand prefix → not brand-segmented
+        found.add(first)
+    return len(found) >= 2
+
+
 # ── Geo-segmentation heuristic ───────────────────────────────────────────────
 def _is_geo_segmented(campaign_names: list[str]) -> bool:
     """Return True if all campaign names share a prefix and differ only in a
@@ -218,6 +251,7 @@ class Conflict:
     conflict_type: str      # EXACT_DUPLICATE / MATCH_TYPE_OVERLAP / PHRASE_CONTAINS / CLOSE_VARIANT
     keywords_involved: list[KeywordRow] = field(default_factory=list)
     geo_segmented: bool = False
+    brand_segmented: bool = False  # NEW v1.0.5: intentional parallel brand campaigns
     all_paused: bool = False
 
     @property
@@ -386,7 +420,7 @@ def _is_serving(status: str) -> bool:
     return True
 
 
-def detect_conflicts(rows: list[KeywordRow]) -> list[Conflict]:
+def detect_conflicts(rows: list[KeywordRow], brand_prefixes: list[str] | None = None) -> list[Conflict]:
     """Run all four detectors per-account. Returns deduplicated list of conflicts.
 
     Skips non-serving keywords (Paused, Not eligible). Google Ads' effective
@@ -396,6 +430,12 @@ def detect_conflicts(rows: list[KeywordRow]) -> list[Conflict]:
     are different clients and don't compete with each other for impressions,
     so we never flag cross-account "conflicts". If the export has no Account
     column (single-account export), all rows are treated as one account.
+
+    `brand_prefixes`: optional list of campaign-name first-token prefixes that
+    represent intentional parallel brand campaigns (e.g. ['DNZ', 'SF'] for an
+    account running both DNZ-branded and SF-branded campaign trees in
+    parallel). Conflicts spanning these prefixes get a 'brand_segmented' flag
+    and are excluded from the Suggested Pauses sheet.
     """
     # Filter out non-serving keywords
     active_rows = [r for r in rows if _is_serving(r.status)]
@@ -408,6 +448,14 @@ def detect_conflicts(rows: list[KeywordRow]) -> list[Conflict]:
     conflicts: list[Conflict] = []
     for account_rows in by_account.values():
         conflicts.extend(_detect_within_account(account_rows))
+
+    # Apply brand-prefix annotation
+    if brand_prefixes:
+        for c in conflicts:
+            campaigns = list({r.campaign for r in c.keywords_involved})
+            if _is_brand_segmented(campaigns, brand_prefixes):
+                c.brand_segmented = True
+
     # Sort across all accounts at the end
     conflicts.sort(key=lambda c: (c.severity_rank, -len(c.keywords_involved)))
     return conflicts
@@ -513,6 +561,7 @@ def build_excel(conflicts: list[Conflict], output_path: str):
         "Ad groups",
         "Campaigns",
         "Probably geo-segmented?",
+        "Probably brand-segmented?",
         "All paused?",
         "# instances",
     ]
@@ -534,19 +583,20 @@ def build_excel(conflicts: list[Conflict], output_path: str):
             " | ".join(sorted(ags)),
             " | ".join(sorted(camps)),
             "TRUE" if c.geo_segmented else "FALSE",
+            "TRUE" if c.brand_segmented else "FALSE",
             "TRUE" if c.all_paused else "FALSE",
             len(c.keywords_involved),
         ]
         fill = SEVERITY_FILL.get(c.conflict_type, FILL_GREY)
-        if c.geo_segmented or c.all_paused:
+        if c.geo_segmented or c.brand_segmented or c.all_paused:
             fill = FILL_GREY  # de-emphasize likely-intentional overlaps
         for col_idx, val in enumerate(vals, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
             cell.fill = fill
             cell.alignment = Alignment(wrap_text=False, vertical="top")
 
-    widths = [22, 40, 22, 40, 40, 20, 12, 12]
-    for col_letter, width in zip("ABCDEFGH", widths):
+    widths = [22, 40, 22, 40, 40, 20, 22, 12, 12]
+    for col_letter, width in zip("ABCDEFGHI", widths):
         ws.column_dimensions[col_letter].width = width
     ws.freeze_panes = "A2"
 
@@ -569,7 +619,7 @@ def build_excel(conflicts: list[Conflict], output_path: str):
     seen_pauses: set[tuple[str, str, int]] = set()  # (campaign, ad_group, row_index)
     for c in conflicts:
         # Don't suggest pauses for already-intentional overlaps
-        if c.geo_segmented or c.all_paused:
+        if c.geo_segmented or c.brand_segmented or c.all_paused:
             continue
         # Don't suggest pauses for CLOSE_VARIANT (low severity, often legitimate plurals)
         if c.conflict_type == "CLOSE_VARIANT":
@@ -656,6 +706,14 @@ def main():
              "If omitted, all accounts in the CSV are processed. "
              'Example: --accounts "ARBO,Ewals,Smartgyro"',
     )
+    parser.add_argument(
+        "--brand-prefixes", default="",
+        help="Comma-separated list of campaign-name first-token prefixes that represent intentional "
+             "parallel brand campaigns. Conflicts that span 2+ of these prefixes are flagged as "
+             "'Probably brand-segmented' and excluded from Suggested Pauses. "
+             'Example: --brand-prefixes "DNZ,SF" for an account running both DNZ-branded and '
+             "SF-branded campaign trees in parallel.",
+    )
     args = parser.parse_args()
 
     csv_path = args.csv_path
@@ -692,7 +750,9 @@ def main():
     not_serving = len(rows) - serving
     print(f"\n  Serving: {serving}, Not serving (paused / not eligible / disapproved): {not_serving}")
 
-    conflicts = detect_conflicts(rows)
+    brand_prefixes = [b.strip() for b in args.brand_prefixes.split(",") if b.strip()] if args.brand_prefixes else None
+
+    conflicts = detect_conflicts(rows, brand_prefixes=brand_prefixes)
     print(f"\nConflicts detected: {len(conflicts)}")
     by_type: dict[str, int] = defaultdict(int)
     for c in conflicts:
@@ -701,8 +761,13 @@ def main():
         print(f"  {ctype:22}: {count}")
 
     geo_count = sum(1 for c in conflicts if c.geo_segmented)
+    brand_count = sum(1 for c in conflicts if c.brand_segmented)
+    real = sum(1 for c in conflicts if not (c.geo_segmented or c.brand_segmented or c.all_paused))
     if geo_count:
         print(f"\n  Probably geo-segmented (likely intentional): {geo_count}")
+    if brand_count:
+        print(f"  Probably brand-segmented (likely intentional): {brand_count}")
+    print(f"  Real (after intentional filter): {real}")
 
     build_excel(conflicts, output_path)
     print(f"\nSaved: {output_path}")
