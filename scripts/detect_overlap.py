@@ -551,54 +551,138 @@ def _make_conflict(ctype: str, rows: list[KeywordRow]) -> Conflict:
 
 def build_excel(conflicts: list[Conflict], output_path: str):
     wb = Workbook()
-    ws = wb.active
-    ws.title = "Overlap Issues"
-
-    headers = [
-        "Conflict type",
-        "Keyword(s)",
-        "Match types",
-        "Ad groups",
-        "Campaigns",
-        "Probably geo-segmented?",
-        "Probably brand-segmented?",
-        "All paused?",
-        "# instances",
-    ]
     header_font = Font(bold=True)
-    for col_idx, h in enumerate(headers, 1):
+
+    # Split conflicts into "real" (action needed) and "intentional" (review only)
+    real_conflicts = [c for c in conflicts if not (c.geo_segmented or c.brand_segmented or c.all_paused)]
+    intentional_conflicts = [c for c in conflicts if c.geo_segmented or c.brand_segmented or c.all_paused]
+
+    # ── Sheet 1: ACTION ITEMS — only real conflicts, account-grouped ────────
+    ws = wb.active
+    ws.title = "Action Items"
+
+    action_headers = [
+        "Severity", "Account", "Conflict type",
+        "Keyword(s)", "Match types", "Ad groups", "Campaigns", "# instances",
+    ]
+    for col_idx, h in enumerate(action_headers, 1):
         cell = ws.cell(row=1, column=col_idx, value=h)
         cell.font = header_font
+        cell.fill = PatternFill("solid", fgColor="404040")
+        cell.font = Font(bold=True, color="FFFFFF")
 
-    for row_idx, c in enumerate(conflicts, 2):
+    severity_label = {
+        "EXACT_DUPLICATE": "🔴 High",
+        "MATCH_TYPE_OVERLAP": "🟡 Medium",
+        "PHRASE_CONTAINS": "🟡 Medium",
+        "CLOSE_VARIANT": "🟢 Low",
+    }
+
+    # Sort: account first, then severity, then # instances desc
+    real_sorted = sorted(real_conflicts, key=lambda c: (
+        c.keywords_involved[0].account.lower() if c.keywords_involved and c.keywords_involved[0].account else "zzzz",
+        c.severity_rank,
+        -len(c.keywords_involved),
+    ))
+
+    row_idx = 2
+    last_account = None
+    for c in real_sorted:
+        account = c.keywords_involved[0].account if c.keywords_involved else ""
+        # Insert account-section header row
+        if account != last_account and account:
+            section_cell = ws.cell(row=row_idx, column=1, value=f"━━ {account} ━━")
+            section_cell.font = Font(bold=True, italic=True, size=11)
+            section_cell.fill = PatternFill("solid", fgColor="DDEBF7")
+            ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=8)
+            row_idx += 1
+            last_account = account
+
         kws = list({r.keyword for r in c.keywords_involved})
         mts = list({r.match_type for r in c.keywords_involved})
         ags = list({r.ad_group for r in c.keywords_involved})
         camps = list({r.campaign for r in c.keywords_involved})
 
         vals = [
+            severity_label.get(c.conflict_type, ""),
+            account,
             c.conflict_type.replace("_", " ").title(),
             " | ".join(sorted(kws)),
             ", ".join(sorted(mts)),
             " | ".join(sorted(ags)),
             " | ".join(sorted(camps)),
-            "TRUE" if c.geo_segmented else "FALSE",
-            "TRUE" if c.brand_segmented else "FALSE",
-            "TRUE" if c.all_paused else "FALSE",
             len(c.keywords_involved),
         ]
-        fill = SEVERITY_FILL.get(c.conflict_type, FILL_GREY)
-        if c.geo_segmented or c.brand_segmented or c.all_paused:
-            fill = FILL_GREY  # de-emphasize likely-intentional overlaps
+        fill = SEVERITY_FILL.get(c.conflict_type, None)
         for col_idx, val in enumerate(vals, 1):
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
-            cell.fill = fill
+            if fill:
+                cell.fill = fill
             cell.alignment = Alignment(wrap_text=False, vertical="top")
+        row_idx += 1
 
-    widths = [22, 40, 22, 40, 40, 20, 22, 12, 12]
-    for col_letter, width in zip("ABCDEFGHI", widths):
+    if not real_sorted:
+        cell = ws.cell(row=2, column=1, value="No real conflicts detected — all overlaps appear intentional (geo / brand / paused).")
+        cell.font = Font(italic=True, color="888888")
+        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=8)
+
+    widths = [12, 22, 18, 38, 22, 35, 35, 12]
+    for col_letter, width in zip("ABCDEFGH", widths):
         ws.column_dimensions[col_letter].width = width
     ws.freeze_panes = "A2"
+
+    # ── Sheet 2: ALL ISSUES — full reference (real + intentional) ────────────
+    all_ws = wb.create_sheet("All Issues (reference)")
+    all_headers = [
+        "Status", "Severity", "Account", "Conflict type",
+        "Keyword(s)", "Match types", "Ad groups", "Campaigns",
+        "Geo-segmented?", "Brand-segmented?", "All paused?", "# instances",
+    ]
+    for col_idx, h in enumerate(all_headers, 1):
+        cell = all_ws.cell(row=1, column=col_idx, value=h)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="404040")
+
+    # Sort: real first (severity), then intentional (geo, brand, paused)
+    all_sorted = sorted(conflicts, key=lambda c: (
+        0 if not (c.geo_segmented or c.brand_segmented or c.all_paused) else 1,
+        c.severity_rank,
+        c.keywords_involved[0].account.lower() if c.keywords_involved and c.keywords_involved[0].account else "zzzz",
+        -len(c.keywords_involved),
+    ))
+
+    for r_i, c in enumerate(all_sorted, 2):
+        intentional = c.geo_segmented or c.brand_segmented or c.all_paused
+        kws = list({r.keyword for r in c.keywords_involved})
+        mts = list({r.match_type for r in c.keywords_involved})
+        ags = list({r.ad_group for r in c.keywords_involved})
+        camps = list({r.campaign for r in c.keywords_involved})
+        account = c.keywords_involved[0].account if c.keywords_involved else ""
+
+        vals = [
+            "Intentional" if intentional else "Action needed",
+            severity_label.get(c.conflict_type, ""),
+            account,
+            c.conflict_type.replace("_", " ").title(),
+            " | ".join(sorted(kws)),
+            ", ".join(sorted(mts)),
+            " | ".join(sorted(ags)),
+            " | ".join(sorted(camps)),
+            "TRUE" if c.geo_segmented else "",
+            "TRUE" if c.brand_segmented else "",
+            "TRUE" if c.all_paused else "",
+            len(c.keywords_involved),
+        ]
+        fill = FILL_GREY if intentional else SEVERITY_FILL.get(c.conflict_type, None)
+        for col_idx, val in enumerate(vals, 1):
+            cell = all_ws.cell(row=r_i, column=col_idx, value=val)
+            if fill:
+                cell.fill = fill
+
+    all_widths = [13, 12, 20, 18, 35, 22, 32, 32, 14, 16, 12, 10]
+    for col_letter, width in zip("ABCDEFGHIJKL", all_widths):
+        all_ws.column_dimensions[col_letter].width = width
+    all_ws.freeze_panes = "A2"
 
     # ── Sheet 2: Suggested Pauses (Editor-importable) ───────────────────────
     pauses_ws = wb.create_sheet("Suggested Pauses")
