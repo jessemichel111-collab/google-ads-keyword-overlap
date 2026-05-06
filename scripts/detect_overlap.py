@@ -533,12 +533,17 @@ def build_excel(conflicts: list[Conflict], output_path: str):
     # ── Sheet 2: Suggested Pauses (Editor-importable) ───────────────────────
     pauses_ws = wb.create_sheet("Suggested Pauses")
     pause_headers = [
-        "Campaign", "Ad group", "Keyword", "Match type", "Status",
+        "Campaign", "Ad group", "Keyword", "Match type",
+        "Current status",  # what it is now (Eligible / Limited)
+        "Status",          # what to set it to (Paused) — Editor uses this column
         "Conflict type", "Reason",
     ]
     for col_idx, h in enumerate(pause_headers, 1):
         cell = pauses_ws.cell(row=1, column=col_idx, value=h)
         cell.font = header_font
+
+    # Subtle hint at the top: the "Status" column is the ACTION to apply, not current state
+    pauses_ws.cell(row=1, column=5).comment = None  # placeholder; openpyxl needs Comment object
 
     pause_row = 2
     seen_pauses: set[tuple[str, str, int]] = set()  # (campaign, ad_group, row_index)
@@ -567,17 +572,18 @@ def build_excel(conflicts: list[Conflict], output_path: str):
                 kw_decorated = f'"{r.keyword}"'
             pauses_ws.cell(row=pause_row, column=3, value=kw_decorated)
             pauses_ws.cell(row=pause_row, column=4, value=r.raw_match_type)
-            pauses_ws.cell(row=pause_row, column=5, value="Paused")
-            pauses_ws.cell(row=pause_row, column=6, value=c.conflict_type.replace("_", " ").title())
+            pauses_ws.cell(row=pause_row, column=5, value=r.status or "Eligible")  # current status
+            pauses_ws.cell(row=pause_row, column=6, value="Paused")  # action: set to Paused
+            pauses_ws.cell(row=pause_row, column=7, value=c.conflict_type.replace("_", " ").title())
             reason = (
                 f"Conflicts with {len(instances)-1} other instance(s) "
                 f"in campaign(s): {', '.join(sorted({r2.campaign for r2 in instances if r2.row_index != r.row_index}))}"
             )
-            pauses_ws.cell(row=pause_row, column=7, value=reason)
+            pauses_ws.cell(row=pause_row, column=8, value=reason)
             pause_row += 1
 
-    pause_widths = [28, 28, 32, 14, 10, 22, 50]
-    for col_letter, width in zip("ABCDEFG", pause_widths):
+    pause_widths = [28, 28, 32, 14, 14, 12, 22, 50]
+    for col_letter, width in zip("ABCDEFGH", pause_widths):
         pauses_ws.column_dimensions[col_letter].width = width
     pauses_ws.freeze_panes = "A2"
 
