@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Test outputs
+test_output/
+*.log
+
+# Local data
+*.csv
+!sample_*.csv
+*.xlsx
+!sample_*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
