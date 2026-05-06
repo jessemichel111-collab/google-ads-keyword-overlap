@@ -256,13 +256,29 @@ def _detect_delimiter(line: str) -> str:
 
 
 def _find_column(headers: list[str], candidates: list[str]) -> int:
-    """Return 0-based index of first header containing any candidate (case-insensitive)."""
-    for i, h in enumerate(headers):
-        if not h:
+    """Return 0-based index of header best matching any candidate.
+
+    Prefers EXACT match (case-insensitive, trimmed) over substring match. This
+    avoids "Keyword" matching "Keyword status" when "Keyword" exists as its
+    own column. Substring fallback only kicks in when no exact match found.
+    """
+    headers_lower = [(i, str(h or "").lower().strip()) for i, h in enumerate(headers)]
+    candidates_lower = [c.lower().strip() for c in candidates]
+
+    # 1st pass: exact match
+    for i, h_low in headers_lower:
+        if not h_low:
             continue
-        h_lower = str(h).lower()
-        if any(c.lower() in h_lower for c in candidates):
+        if h_low in candidates_lower:
             return i
+
+    # 2nd pass: substring match (original behavior, as fallback)
+    for i, h_low in headers_lower:
+        if not h_low:
+            continue
+        if any(c in h_low for c in candidates_lower):
+            return i
+
     return -1
 
 
